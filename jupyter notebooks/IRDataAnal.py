@@ -412,7 +412,7 @@ class calibrationData:
         return np.array(T2_training), np.array(T2_testing), np.array(Q_training), np.array(Q_testing)
 
 
-    def TrainTestQTscores(self, pca_rank): 
+    def TrainTestQTscores(self): 
 
         pca = PCA(10).fit(self.train_ir)
         cumexpratio = np.cumsum(pca.explained_variance_ratio_)
@@ -449,9 +449,14 @@ class calibrationData:
         train_ir_scale = (self.train_ir - self.train_ir.mean(axis=0)) / self.train_ir.std(axis=0, ddof=1)
         test_ir_scale = (self.test_ir - self.train_ir.mean(axis=0)) / self.train_ir.std(axis=0, ddof=1)
 
+        print(train_ir_scale.shape)
+
         pca = PCA(pca_rank).fit(train_ir_scale)
         transformed_data = pca.transform(train_ir_scale)
         tdata_test = pca.transform(test_ir_scale)
+
+        cumexpratio = np.cumsum(pca.explained_variance_ratio_)
+        print(cumexpratio)
 
         # variances of each pca component from training dataset
         sa = np.var(transformed_data, axis=0)
@@ -527,8 +532,6 @@ class calibrationData:
 
     def visualizeComponents(self, comp_to_visual, exp_labels, skip=1): 
 
-
-
         llist = self.new_dataLList
 
         shape = ['o', 'x', '>', 'p', '*', '+', '<', '1', '2', '3', '4', '8', '|']
@@ -543,7 +546,7 @@ class calibrationData:
 
             alpha_list = np.linspace(0.1, 1, e-s)[::-1]
 
-            plt.scatter(transformed_data[s:e:skip, ind1], transformed_data[s:e:skip, ind2], label=exp_labels[i], marker=shape[i], c=clist[i], alpha=alpha_list)
+            plt.scatter(transformed_data[s:e, ind1], transformed_data[s:e, ind2], label=exp_labels[i], marker=shape[i], c=clist[i], alpha=alpha_list)
             # plt.annotate(i+1, (transformed_data[s, ind1], transformed_data[s, ind2]), c=clist[i])
 
             s = e
@@ -561,6 +564,8 @@ class calibrationData:
         plt.plot(transformed_data[:, ind1].max()*np.cos(an), transformed_data[:, ind2].max()*np.sin(an), c='k', lw=0.5) 
         plt.axvline(x=0, c='k', lw=0.3)
         plt.axhline(y=0, c='k', lw=0.3)
+
+        return pca, transformed_data
         
 
     def loadExtraSpectra(self, extra_spectra):
@@ -710,7 +715,7 @@ class calibrationData:
     
         return absorbance - corr
 
-    def trainTestSplit(self, test_exp_inds, ignore=[]): 
+    def trainTestSplit(self, test_exp_inds, train_skip, ignore=[]): 
 
         # exp_ind is a list of experiment index that will be used as testing data
         # the remaining data will used for training
@@ -729,9 +734,9 @@ class calibrationData:
             elif i in ignore: 
                 pass
             else: 
-                self.train_ir.append(self.raw_ir_data_preprocess[s:e, :])
-                self.train_lc.append(self.lc_data[s:e, :])
-                self.train_dataLList.append(e-s)
+                self.train_ir.append(self.raw_ir_data_preprocess[s:e:train_skip, :])
+                self.train_lc.append(self.lc_data[s:e:train_skip, :])
+                self.train_dataLList.append(self.train_lc[-1].shape[0])
 
             s = e
             if i == len(self.new_dataLList) - 1: 

@@ -26,13 +26,14 @@ from scipy.signal import savgol_filter
 
 import math
 
-
-def autoBaselinePoints(wavenumber, intensity, peak_loc_wavenumber, isosbestic, n_sim): 
+def autoBaselinePoints(wavenumber, intensity, peak_loc_wavenumber, isosbestic, n_sim, manual_tune=False): 
 
     # compute the two baseline points by looking for isosbestic points
     # alternatively, compute baseline points thats in the valley of the spectra after first or second derivative transformation
     # intensity should have shape (nspectra x nfeatures), and should be from a single experiment
     # wavenumber should be an array of increasing value (need to manual invert the wavenumber before feeding into this function)
+
+    # manual_tune is specifically for experiment 0089-3 
 
     # generate fake ir datapoints by linearly extrapolating from the nearby real data points
     fake_intensity_all = []
@@ -62,13 +63,23 @@ def autoBaselinePoints(wavenumber, intensity, peak_loc_wavenumber, isosbestic, n
 
     # compute the abs values of std in the fake intensity
     # valley corresponds to isosbestic points and peaks corresponds to valley in the original IR data
-    absVar = np.abs(fake_intensity_all.std(axis=0))
-    peaks, _ = find_peaks(absVar)  
-    valleys, _ = find_peaks(-absVar)  
+    if manual_tune: 
+        absVar = np.abs(intensity.std(axis=0))
+        peaks, _ = find_peaks(absVar)  
+        valleys, _ = find_peaks(-absVar)  
 
-    # identify the correct peak location 
-    peaks_wavenumber = fake_wavenumbers[peaks]
-    # print(peaks_wavenumber)
+        # identify the correct peak location 
+        peaks_wavenumber = wavenumber[peaks]
+
+    else: 
+
+        absVar = np.abs(fake_intensity_all.std(axis=0))
+        peaks, _ = find_peaks(absVar)  
+        valleys, _ = find_peaks(-absVar)  
+
+        # identify the correct peak location 
+        peaks_wavenumber = fake_wavenumbers[peaks]
+
     diff = np.abs(peak_loc_wavenumber - peaks_wavenumber)
     desired_peak_location = np.where(diff==diff.min())[0][0] 
 
@@ -83,27 +94,12 @@ def autoBaselinePoints(wavenumber, intensity, peak_loc_wavenumber, isosbestic, n
         distances = np.abs(peaks - peaks[desired_peak_location])   # Distance from the peak to each valley
         nearest_peaks_indices = np.argsort(distances)[1:3]  # Indices of the two nearest valleys
         nearest_peaks = peaks[nearest_peaks_indices]
+        nearest_peaks = np.sort(nearest_peaks)
+        if manual_tune: 
+            nearest_peaks[-1] -= 1
+            return wavenumber, intensity, nearest_peaks
 
-        return fake_wavenumbers, fake_intensity_all, np.sort(nearest_peaks)
-
-
-# def GridSearchCVbyExp(rgr, paramters, scoring, cv): 
-
-#     # perform cv, instead on random subset of the training data, on different experiment
-
-#     s, e = 0, ir.train_dataLList[0]
-#     for i in range(len(ir.train_dataLList)): 
-
-#         x_val_s = ir.train_ir[:s, :]
-#         x_val_e = ir.train_ir[e:, :]
-#         x_val = np.vstack((x_val_s, x_val_e))
-
-#         y_val_s = ir.train_lc[:s, :]
-#         y_val_e = ir.train_lc[e:, :]
-#         y_val = np.vstack((y_val_s, y_val_e))
-
-#         x_train = ir.train_ir[s:e, :]
-#         y_train = ir.train_lc[s:e, :]
+        return fake_wavenumbers, fake_intensity_all, nearest_peaks
 
 
 # functions for normalizing data
@@ -169,23 +165,32 @@ def generateTrends(trend_method, ir_data, ir_data_length, ir_wavenumber, peaks_w
 
     for i in range(len(ir_data_length)): 
 
-        temp_abs = ir_data[s:e, :]
-        fake_wavenumbers, fake_intensity_all, baseline_index = autoBaselinePoints(ir_wavenumber, temp_abs, peaks_wavenumber, isosbestic, n_sim)
-        # print(baseline_index)
+        if trend_method == 'Ridge': 
+            
+            trend_list.append(ir_data[s:e, :])
 
-        if diagnostic: 
-            plt.figure()
-            plt.plot(fake_wavenumbers, fake_intensity_all.T);
-            plt.scatter(fake_wavenumbers[baseline_index], fake_intensity_all[diagnostic, baseline_index])
+        else: 
+            if i == 2 and isosbestic is False: 
+                manual_tune = True
+            else: 
+                manual_tune = False
+            temp_abs = ir_data[s:e, :]
+            fake_wavenumbers, fake_intensity_all, baseline_index = autoBaselinePoints(ir_wavenumber, temp_abs, peaks_wavenumber, isosbestic, n_sim, manual_tune)
+            # print(baseline_index)
+
+            if diagnostic: 
+                plt.figure()
+                plt.plot(fake_wavenumbers, fake_intensity_all.T, alpha=0.5);
+                plt.scatter(fake_wavenumbers[baseline_index], fake_intensity_all[diagnostic, baseline_index], c='r')
 
 
-        temp_trend = []
-        
-        for j in range(temp_abs.shape[0]):
-            spec = np.hstack((ir_wavenumber[:, np.newaxis], temp_abs[j, :][:, np.newaxis]))
-            temp_trend.append(trend_method(fake_wavenumbers[baseline_index], fake_intensity_all[j, baseline_index], spec))
+            temp_trend = []
+            
+            for j in range(temp_abs.shape[0]):
+                spec = np.hstack((ir_wavenumber[:, np.newaxis], temp_abs[j, :][:, np.newaxis]))
+                temp_trend.append(trend_method(fake_wavenumbers[baseline_index], fake_intensity_all[j, baseline_index], spec))
 
-        trend_list.append(temp_trend)
+            trend_list.append(temp_trend)
 
         s = e
         if i == len(ir_data_length) - 1: 
@@ -214,47 +219,6 @@ def prepDataUnivariateCal(ir_trend_list, ir_data_length, lc_data, lc_convert_pro
             e = e + ir_data_length[i+1]
 
     return univariate_cal_data
-
-
-# custom regressors for sklearn
-class PCRegression(BaseEstimator):
-
-    def __init__(self, n_components=2):
-        self.n_components = n_components
-
-    def fit(self, X, y): 
-        self.pca = PCA(self.n_components).fit(X)
-        X_transform = self.pca.transform(X)
-        self.regr = LinearRegression()
-        self.regr.fit(X_transform, y)
-
-        return 
-
-    def predict(self, x): 
-        x_transform = self.pca.transform(x)
-
-        return self.regr.predict(x_transform)
-
-class ScaledSVR(BaseEstimator): 
-
-    def __init__(self, kernel, gamma, C, epsilon):
-        self.kernel = kernel
-        self.gamma = gamma
-        self.C = C
-        self.epsilon = epsilon
-
-    def fit(self, X, y): 
-        self.regr = SVR(kernel=self.kernel, gamma=self.gamma, C=self.C, epsilon=self.epsilon)
-        scaled_X, scaled_y, self.x_mean, self.y_mean, self.x_std, self.y_std = _center_scale_xy(X, y, scale=True)
-        self.regr.fit(scaled_X,scaled_y.ravel())
-
-        return
-
-    def predict(self, x_test): 
-        x_test_scaled = (x_test-self.x_mean) / self.x_std
-        pred_scaled = self.regr.predict(x_test_scaled)
-
-        return pred_scaled * self.y_std + self.y_mean
 
 
 class calibrationData:
@@ -384,121 +348,119 @@ class calibrationData:
         return spec
 
 
-    def TrainTestQTscores_PLS(self, PLSR): 
+    # def TrainTestQTscores_PLS(self, PLSR): 
 
-        train_ir_scale = (self.train_ir - PLSR.x.mean_) / PLSR.x.std_
-        test_ir_scale = (self.test_ir - PLSR.x.mean_) / PLSR.x.std_
+    #     train_ir_scale = (self.train_ir - PLSR.x.mean_) / PLSR.x.std_
+    #     test_ir_scale = (self.test_ir - PLSR.x.mean_) / PLSR.x.std_
 
-        T_mat_train = train_ir_scale @ PLSR.x_rotations_
-        T_mat_test = test_ir_scale @ PLSR.x_rotations_
-        sa = np.var(T_mat_train, axis=0)
-        Q_mat = np.eye(self.train_ir.shape[-1]) - PLSR.x_rotations_ @ PLSR.x_rotations_.T
+    #     T_mat_train = train_ir_scale @ PLSR.x_rotations_
+    #     T_mat_test = test_ir_scale @ PLSR.x_rotations_
+    #     sa = np.var(T_mat_train, axis=0)
+    #     Q_mat = np.eye(self.train_ir.shape[-1]) - PLSR.x_rotations_ @ PLSR.x_rotations_.T
 
-        # compute T2 and Q score for each training ir spectrum
-        T2_training = []
-        Q_training = []
+    #     # compute T2 and Q score for each training ir spectrum
+    #     T2_training = []
+    #     Q_training = []
 
-        for i in range(self.train_ir.shape[0]): 
-            T2_training.append(np.sum((T_mat_train[i, :]**2 / sa)))
-            Q_training.append(train_ir_scale[i, :].reshape(1, -1) @ Q_mat @ train_ir_scale[i, :].reshape(-1, 1))
+    #     for i in range(self.train_ir.shape[0]): 
+    #         T2_training.append(np.sum((T_mat_train[i, :]**2 / sa)))
+    #         Q_training.append(train_ir_scale[i, :].reshape(1, -1) @ Q_mat @ train_ir_scale[i, :].reshape(-1, 1))
 
-        # compute T2 score for each testing ir spectrum
-        T2_testing = []
-        Q_testing = []
-        for i in range(self.test_ir.shape[0]): 
-            T2_testing.append(np.sum((T_mat_test[i, :]**2 / sa)))
-            Q_testing.append(test_ir_scale[i, :].reshape(1, -1) @ Q_mat @ test_ir_scale[i, :].reshape(-1, 1))
+    #     # compute T2 score for each testing ir spectrum
+    #     T2_testing = []
+    #     Q_testing = []
+    #     for i in range(self.test_ir.shape[0]): 
+    #         T2_testing.append(np.sum((T_mat_test[i, :]**2 / sa)))
+    #         Q_testing.append(test_ir_scale[i, :].reshape(1, -1) @ Q_mat @ test_ir_scale[i, :].reshape(-1, 1))
 
-        return np.array(T2_training), np.array(T2_testing), np.array(Q_training), np.array(Q_testing)
-
-
-    def TrainTestQTscores(self): 
-
-        pca = PCA(10).fit(self.train_ir)
-        cumexpratio = np.cumsum(pca.explained_variance_ratio_)
-        first99 = np.where(cumexpratio >= 0.99)[0][0]
-        print(first99+1)
-        pca = PCA(first99+1).fit(self.train_ir)
-        transformed_data = pca.transform(self.train_ir)
-        tdata_test = pca.transform(self.test_ir)
-
-        # variances of each pca component from training dataset
-        sa = np.var(transformed_data, axis=0)
-
-        # pca component matrix used to compute Q values
-        Q_mat = np.eye(self.train_ir.shape[-1]) - pca.components_.T @ pca.components_
-
-        # compute T2 and Q score for each training ir spectrum
-        T2_training = []
-        Q_training = []
-        for i in range(transformed_data.shape[0]): 
-            T2_training.append(np.sum((transformed_data[i, :]**2 / sa)))
-            Q_training.append(self.train_ir[i, :].reshape(1, -1) @ Q_mat @ self.train_ir[i, :].reshape(-1, 1))
-
-        # compute T2 score for each testing ir spectrum
-        T2_testing = []
-        Q_testing = []
-        for i in range(tdata_test.shape[0]): 
-            T2_testing.append(np.sum((tdata_test[i, :]**2 / sa)))
-            Q_testing.append(self.test_ir[i, :].reshape(1, -1) @ Q_mat @ self.test_ir[i, :].reshape(-1, 1))
-
-        return np.array(T2_training), np.array(T2_testing), np.array(Q_training).reshape(-1, ), np.array(Q_testing).reshape(-1, ), pca
-
-    def TrainTestQTscores_scaled(self, pca_rank): 
-
-        train_ir_scale = (self.train_ir - self.train_ir.mean(axis=0)) / self.train_ir.std(axis=0, ddof=1)
-        test_ir_scale = (self.test_ir - self.train_ir.mean(axis=0)) / self.train_ir.std(axis=0, ddof=1)
-
-        print(train_ir_scale.shape)
-
-        pca = PCA(pca_rank).fit(train_ir_scale)
-        transformed_data = pca.transform(train_ir_scale)
-        tdata_test = pca.transform(test_ir_scale)
-
-        cumexpratio = np.cumsum(pca.explained_variance_ratio_)
-        print(cumexpratio)
-
-        # variances of each pca component from training dataset
-        sa = np.var(transformed_data, axis=0)
-
-        # pca component matrix used to compute Q values
-        Q_mat = np.eye(self.train_ir.shape[-1]) - pca.components_.T @ pca.components_
-
-        # compute T2 and Q score for each training ir spectrum
-        T2_training = []
-        Q_training = []
-        for i in range(transformed_data.shape[0]): 
-            T2_training.append(np.sum((transformed_data[i, :]**2 / sa)))
-            Q_training.append(train_ir_scale[i, :].reshape(1, -1) @ Q_mat @ train_ir_scale[i, :].reshape(-1, 1))
-
-        # compute T2 score for each testing ir spectrum
-        T2_testing = []
-        Q_testing = []
-        for i in range(tdata_test.shape[0]): 
-            T2_testing.append(np.sum((tdata_test[i, :]**2 / sa)))
-            Q_testing.append(test_ir_scale[i, :].reshape(1, -1) @ Q_mat @ test_ir_scale[i, :].reshape(-1, 1))
-
-        return np.array(T2_training), np.array(T2_testing), np.array(Q_training), np.array(Q_testing), pca
+    #     return np.array(T2_training), np.array(T2_testing), np.array(Q_training), np.array(Q_testing)
 
 
-    def TrainTestPCA(self, comp_to_visual, train_labels, test_labels, skip=1): 
+    # def TrainTestQTscores(self): 
+
+    #     pca = PCA(10).fit(self.train_ir)
+    #     cumexpratio = np.cumsum(pca.explained_variance_ratio_)
+    #     first99 = np.where(cumexpratio >= 0.99)[0][0]
+    #     print(first99+1)
+    #     pca = PCA(first99+1).fit(self.train_ir)
+    #     transformed_data = pca.transform(self.train_ir)
+    #     tdata_test = pca.transform(self.test_ir)
+
+    #     # variances of each pca component from training dataset
+    #     sa = np.var(transformed_data, axis=0)
+
+    #     # pca component matrix used to compute Q values
+    #     Q_mat = np.eye(self.train_ir.shape[-1]) - pca.components_.T @ pca.components_
+
+    #     # compute T2 and Q score for each training ir spectrum
+    #     T2_training = []
+    #     Q_training = []
+    #     for i in range(transformed_data.shape[0]): 
+    #         T2_training.append(np.sum((transformed_data[i, :]**2 / sa)))
+    #         Q_training.append(self.train_ir[i, :].reshape(1, -1) @ Q_mat @ self.train_ir[i, :].reshape(-1, 1))
+
+    #     # compute T2 score for each testing ir spectrum
+    #     T2_testing = []
+    #     Q_testing = []
+    #     for i in range(tdata_test.shape[0]): 
+    #         T2_testing.append(np.sum((tdata_test[i, :]**2 / sa)))
+    #         Q_testing.append(self.test_ir[i, :].reshape(1, -1) @ Q_mat @ self.test_ir[i, :].reshape(-1, 1))
+
+    #     return np.array(T2_training), np.array(T2_testing), np.array(Q_training).reshape(-1, ), np.array(Q_testing).reshape(-1, ), pca
+
+    # def TrainTestQTscores_scaled(self, pca_rank): 
+
+    #     train_ir_scale = (self.train_ir - self.train_ir.mean(axis=0)) / self.train_ir.std(axis=0, ddof=1)
+    #     test_ir_scale = (self.test_ir - self.train_ir.mean(axis=0)) / self.train_ir.std(axis=0, ddof=1)
+
+    #     print(train_ir_scale.shape)
+
+    #     pca = PCA(pca_rank).fit(train_ir_scale)
+    #     transformed_data = pca.transform(train_ir_scale)
+    #     tdata_test = pca.transform(test_ir_scale)
+
+    #     cumexpratio = np.cumsum(pca.explained_variance_ratio_)
+    #     print(cumexpratio)
+
+    #     # variances of each pca component from training dataset
+    #     sa = np.var(transformed_data, axis=0)
+
+    #     # pca component matrix used to compute Q values
+    #     Q_mat = np.eye(self.train_ir.shape[-1]) - pca.components_.T @ pca.components_
+
+    #     # compute T2 and Q score for each training ir spectrum
+    #     T2_training = []
+    #     Q_training = []
+    #     for i in range(transformed_data.shape[0]): 
+    #         T2_training.append(np.sum((transformed_data[i, :]**2 / sa)))
+    #         Q_training.append(train_ir_scale[i, :].reshape(1, -1) @ Q_mat @ train_ir_scale[i, :].reshape(-1, 1))
+
+    #     # compute T2 score for each testing ir spectrum
+    #     T2_testing = []
+    #     Q_testing = []
+    #     for i in range(tdata_test.shape[0]): 
+    #         T2_testing.append(np.sum((tdata_test[i, :]**2 / sa)))
+    #         Q_testing.append(test_ir_scale[i, :].reshape(1, -1) @ Q_mat @ test_ir_scale[i, :].reshape(-1, 1))
+
+    #     return np.array(T2_training), np.array(T2_testing), np.array(Q_training), np.array(Q_testing), pca
+
+
+    def TrainTestPCA(self, comp_to_visual, train_labels, test_labels, clist, show_test = False, skip=1): 
 
         llist = self.train_dataLList
         testllist = self.test_dataLList
         print(self.train_dataLList)
 
-        pca = PCA(20).fit(self.train_ir)
+        pca = PCA(10).fit(self.train_ir)
         transformed_data = pca.transform(self.train_ir)
 
         s, e = 0, llist[0]
         ind1, ind2 = comp_to_visual
 
         for i in range(len(llist)): 
+            # alpha_list = np.linspace(0.1, 1, e-s)[::-1]
 
-            plt.scatter(transformed_data[s:e:skip, ind1], transformed_data[s:e:skip, ind2], marker='o', label=train_labels[i], alpha=0.15)
-            pp = 20
-
-            plt.annotate(i+1, (transformed_data[s+pp, ind1], transformed_data[s+pp, ind2]))
+            plt.scatter(transformed_data[s:e:skip, ind1], transformed_data[s:e:skip, ind2], marker='o', label=train_labels[i], alpha=1, c=clist[i])
 
             s = e
             if i == len(llist) - 1: 
@@ -506,66 +468,70 @@ class calibrationData:
             else: 
                 e = e + llist[i+1]
 
-        transformed_data_test = pca.transform(self.test_ir)
+        if show_test: 
 
-        s, e = 0, testllist[0]
+            transformed_data_test = pca.transform(self.test_ir)
 
-        for i in range(len(testllist)): 
+            s, e = 0, testllist[0]
 
-            plt.scatter(transformed_data_test[s:e:skip, ind1], transformed_data_test[s:e:skip, ind2], marker='x', label=test_labels[i])
-            # plt.annotate(i+1, (transformed_data_test[s, ind1], transformed_data_test[s, ind2]))
+            for i in range(len(testllist)): 
 
-            s = e
-            if i == len(testllist) - 1: 
-                e = -1
-            else: 
-                e = e + testllist[i+1]
+                plt.scatter(transformed_data_test[s:e:skip, ind1], transformed_data_test[s:e:skip, ind2], marker='x', label=test_labels[i])
+                # plt.annotate(i+1, (transformed_data_test[s, ind1], transformed_data_test[s, ind2]))
 
-        plt.xlabel(f'PC-{ind1+1} ({str(self.pca.explained_variance_ratio_[ind1]*100)[:4]}%)')
-        plt.ylabel(f'PC-{ind2+1} ({str(self.pca.explained_variance_ratio_[ind2]*100)[:4]}%)')
-        plt.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15), ncol=3, fancybox=True, shadow=True)
-
-        # an = np.linspace(0, 2 * np.pi, 100)
-        # plt.plot(transformed_data[:, ind1].max()*np.cos(an), transformed_data[:, ind2].max()*np.sin(an), c='k', lw=0.5) 
-        # plt.axvline(x=0, c='k', lw=0.3)
-        # plt.axhline(y=0, c='k', lw=0.3)
-
-    def visualizeComponents(self, comp_to_visual, exp_labels, skip=1): 
-
-        llist = self.new_dataLList
-
-        shape = ['o', 'x', '>', 'p', '*', '+', '<', '1', '2', '3', '4', '8', '|']
-        clist = ['b', 'orange', 'g', 'r', 'm', 'brown', 'cyan']
-        pca = PCA(20).fit(self.raw_ir_data_preprocess)
-        transformed_data = pca.transform(self.raw_ir_data_preprocess)
-
-        s, e = 0, llist[0]
-        ind1, ind2 = comp_to_visual
-
-        for i in range(len(llist)): 
-
-            alpha_list = np.linspace(0.1, 1, e-s)[::-1]
-
-            plt.scatter(transformed_data[s:e, ind1], transformed_data[s:e, ind2], label=exp_labels[i], marker=shape[i], c=clist[i], alpha=alpha_list)
-            # plt.annotate(i+1, (transformed_data[s, ind1], transformed_data[s, ind2]), c=clist[i])
-
-            s = e
-            if i == len(llist) - 1: 
-                e = -1
-            else: 
-                e = e + llist[i+1]
+                s = e
+                if i == len(testllist) - 1: 
+                    e = -1
+                else: 
+                    e = e + testllist[i+1]
 
         plt.xlabel(f'PC-{ind1+1} ({str(pca.explained_variance_ratio_[ind1]*100)[:4]}%)')
         plt.ylabel(f'PC-{ind2+1} ({str(pca.explained_variance_ratio_[ind2]*100)[:4]}%)')
-        plt.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15),
-          ncol=4, fancybox=True, shadow=True)
+        plt.legend(loc='upper center', bbox_to_anchor=(0.5, -0.2), ncol=3, fancybox=True, shadow=True)
 
         an = np.linspace(0, 2 * np.pi, 100)
-        plt.plot(transformed_data[:, ind1].max()*np.cos(an), transformed_data[:, ind2].max()*np.sin(an), c='k', lw=0.5) 
+        plt.plot(transformed_data[:, ind1].max()*np.cos(an)*1.3, transformed_data[:, ind2].max()*np.sin(an), c='k', lw=0.5) 
         plt.axvline(x=0, c='k', lw=0.3)
         plt.axhline(y=0, c='k', lw=0.3)
 
-        return pca, transformed_data
+        return pca
+
+    # def visualizeComponents(self, comp_to_visual, exp_labels, skip=1): 
+
+    #     llist = self.new_dataLList
+
+    #     shape = ['o', 'x', '>', 'p', '*', '+', '<', '1', '2', '3', '4', '8', '|']
+    #     clist = ['b', 'orange', 'g', 'r', 'm', 'brown', 'cyan']
+    #     pca = PCA(20).fit(self.raw_ir_data_preprocess)
+    #     transformed_data = pca.transform(self.raw_ir_data_preprocess)
+
+    #     s, e = 0, llist[0]
+    #     ind1, ind2 = comp_to_visual
+
+    #     for i in range(len(llist)): 
+
+    #         alpha_list = np.linspace(0.1, 1, e-s)[::-1]
+
+    #         plt.scatter(transformed_data[s:e, ind1], transformed_data[s:e, ind2], label=exp_labels[i], marker=shape[i], c=clist[i], alpha=alpha_list)
+    #         # plt.annotate(i+1, (transformed_data[s, ind1], transformed_data[s, ind2]), c=clist[i])
+
+    #         s = e
+    #         if i == len(llist) - 1: 
+    #             e = -1
+    #         else: 
+    #             e = e + llist[i+1]
+
+    #     plt.xlabel(f'PC-{ind1+1} ({str(pca.explained_variance_ratio_[ind1]*100)[:4]}%)')
+    #     plt.ylabel(f'PC-{ind2+1} ({str(pca.explained_variance_ratio_[ind2]*100)[:4]}%)')
+    #     plt.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15),
+    #       ncol=4, fancybox=True, shadow=True)
+
+    #     an = np.linspace(0, 2 * np.pi, 100)
+    #     plt.plot((transformed_data[:, ind1].max()+0.05)*np.cos(an), transformed_data[:, ind2].max()*np.sin(an), c='k', lw=0.5) 
+    #     plt.axvline(x=0, c='k', lw=0.3)
+    #     plt.axhline(y=0, c='k', lw=0.3)
+
+    #     return pca, transformed_data
         
 
     def loadExtraSpectra(self, extra_spectra):
@@ -636,10 +602,6 @@ class calibrationData:
                     e = e + self.new_dataLList[i+1]
                     e2 = e2 + self.dataLList[i+1]
 
-        if isSmooth:
-            self.raw_ir_data_preprocess = savgol_filter(x=self.raw_ir_data_preprocess, window_length=isSmooth[0], polyorder=isSmooth[1], axis=-1)
-            self.real_raw = savgol_filter(x=self.real_raw, window_length=isSmooth[0], polyorder=isSmooth[1], axis=-1)
-
         if isBaselineCorr: 
 
             temp = []
@@ -665,14 +627,6 @@ class calibrationData:
 
         #     self.raw_ir_data_preprocess = np.vstack(temp_data)
         
-        if isSNV:
-            self.raw_ir_data_preprocess = normalize(self.raw_ir_data_preprocess)
-
-        if isMSC: 
-            self.mean_ref = np.mean(self.raw_ir_data_preprocess, axis=0)
-            for i in range(self.raw_ir_data_preprocess.shape[0]): 
-                fit = np.polyfit(self.mean_ref, self.raw_ir_data_preprocess[i, :], 1)
-                self.raw_ir_data_preprocess[i, :] = (self.raw_ir_data_preprocess[i, :] - fit[1]) / fit[0]
 
         if isDerivative == 1:
             _1st = [np.gradient(self.raw_ir_data_preprocess[i, :]) for i in range(self.raw_ir_data.shape[0])]
@@ -684,6 +638,19 @@ class calibrationData:
             self.raw_ir_data_preprocess = np.array(_2nd)
             _2nd = [-np.gradient(np.gradient(self.real_raw[i, :])) for i in range(self.real_raw.shape[0])]
             self.real_raw = np.array(_2nd)
+
+        if isSNV:
+            self.raw_ir_data_preprocess = normalize(self.raw_ir_data_preprocess)
+
+        if isMSC: 
+            self.mean_ref = np.mean(self.raw_ir_data_preprocess, axis=0)
+            for i in range(self.raw_ir_data_preprocess.shape[0]): 
+                fit = np.polyfit(self.mean_ref, self.raw_ir_data_preprocess[i, :], 1)
+                self.raw_ir_data_preprocess[i, :] = (self.raw_ir_data_preprocess[i, :] - fit[1]) / fit[0]
+
+        if isSmooth:
+            self.raw_ir_data_preprocess = savgol_filter(x=self.raw_ir_data_preprocess, window_length=isSmooth[0], polyorder=isSmooth[1], axis=-1)
+            self.real_raw = savgol_filter(x=self.real_raw, window_length=isSmooth[0], polyorder=isSmooth[1], axis=-1)
 
         if isTruncateSS.any(): 
             self.raw_ir_data_preprocess = self.raw_ir_data_preprocess[isTruncateSS, :]
@@ -701,9 +668,6 @@ class calibrationData:
         if skip: 
 
             self.raw_ir_data_preprocess = self.raw_ir_data_preprocess[::skip, :]
-
-
-        # self.pca = PCA(20).fit(self.raw_ir_data_preprocess)
 
 
     def twoPointBaseline(self, p1, p2, wavenum, absorbance): 
@@ -748,59 +712,3 @@ class calibrationData:
         self.train_lc = np.concatenate(self.train_lc, axis=0)
         self.test_ir = np.concatenate(self.test_ir, axis=0)
         self.test_lc = np.concatenate(self.test_lc, axis=0)
-
-    # not useful any more
-    # def trainValidateSplit(self, ratio, rs):
-
-    #     s, e = 0, self.train_dataLList[0]
-    #     X_train, X_test, y_train, y_test = [], [], [], []
-    #     for i in range(len(self.train_dataLList)):         
-    #         X_train_t, X_test_t, y_train_t, y_test_t = train_test_split(self.train_ir[s:e, :],self.train_lc[s:e, :], 
-    #                                                 test_size=ratio, random_state=rs, shuffle=True)
-    #         X_train.append(X_train_t)
-    #         X_test.append(X_test_t)
-    #         y_train.append(y_train_t)
-    #         y_test.append(y_test_t)
-
-    #         s = e
-    #         if i == len(self.train_dataLList) - 1: 
-    #             e = -1
-    #         else: 
-    #             e = e + self.train_dataLList[i+1]
-
-    #     return np.concatenate(X_train), np.concatenate(X_test), np.concatenate(y_train), np.concatenate(y_test)
-
-
-    def avgModelR2(self, x_, model, sp, n_splits=5, n_repeats=500):
-
-        r2_ = []
-
-        for i in range(n_repeats):
-            kf = KFold(n_splits=n_splits, shuffle=True)
-            split_indices = kf.split(X=self.raw_ir_data_preprocess)
-
-            for train_index, test_index in split_indices:
-                xtrain = x_[train_index]
-                ytrain = self.lc_data[train_index, sp]/np.sum(self.lc_data[train_index, :], axis=1)
-                xtest = x_[test_index]
-                ytest = self.lc_data[test_index, sp]/np.sum(self.lc_data[test_index, :], axis=1)
-
-                model.fit(xtrain, ytrain)
-                ypred = model.predict(xtest)
-                r2_.append(r2_score(ytest, ypred))
-
-        return r2_
-
-    def evaluateModel(self, model_list, name_list, color_list):
-
-        fig, ax = plt.subplots(len(model_list), 1, figsize=(12, 10), sharex=True)
-
-        for i, model in enumerate(model_list):
-
-            r2_hist = self.avgModelR2(model)
-            ax[i].hist(r2_hist, bins=80, alpha=0.25, color=color_list[i], label=name_list[i])
-            ax[i].axvline(x=np.mean(r2_hist), ls='--', c=color_list[i], label=f'r2_avg={np.mean(r2_hist)}')
-            ax[i].legend()
-        ax[0].set_xlim(0, )
-
-        plt.show()
